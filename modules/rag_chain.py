@@ -55,12 +55,12 @@ def _build_huggingface_llm():
         token = os.getenv("HUGGINGFACEHUB_API_TOKEN", "")
         if not token:
             raise ValueError("HUGGINGFACEHUB_API_TOKEN not set")
-
-        model_id = os.getenv("HF_MODEL_ID", HF_MODEL_ID)
+        _model_id = os.getenv("HF_MODEL_ID", HF_MODEL_ID)
+        _token = token
 
         class HFDirectLLM(LLM):
-            model_id: str = model_id
-            hf_token: str = token
+            model_id: str = _model_id
+            hf_token: str = _token
 
             @property
             def _llm_type(self) -> str:
