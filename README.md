@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # 📄 ResearchMate — Research Paper Assistant
 
 > **A production-ready RAG application** for interacting with research papers using natural language.  
@@ -366,3 +367,7 @@ MIT License — see [LICENSE](LICENSE) for details.
 ---
 
 *Built with ❤️ for researchers and students who want to understand papers faster.*
+=======
+# Researchmate-ai
+🔬 ResearchMate AI – Intelligent Research Paper Assistant powered by RAG, Hybrid Search, and LLM. Upload PDFs, chat, summarize, find research gaps, compare papers, and generate novel research ideas.
+>>>>>>> 1ba3a91cc3317230708092dd1209a620ab48df55

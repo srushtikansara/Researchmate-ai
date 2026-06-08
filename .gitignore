@@ -5,3 +5,4 @@ data/uploads/*
 data/vectorstore/*
 .env
 *.zip
+hf-space/

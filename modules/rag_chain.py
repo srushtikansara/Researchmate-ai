@@ -6,10 +6,12 @@ Supports Ollama (local) and HuggingFace Hub backends.
 Enforces strict grounding — no hallucination.
 """
 
+import os
 import logging
 import time
+import requests
 from dataclasses import dataclass, field
-from typing import Optional, Generator
+from typing import Optional
 
 from config import (
     LLM_BACKEND,
@@ -24,7 +26,6 @@ from modules.retriever import PaperRetriever, RetrievalResult, get_retriever
 
 logger = logging.getLogger(__name__)
 
-# Sentinel returned when no relevant context is found
 NO_INFO_RESPONSE = "I could not find this information in the uploaded paper."
 
 
@@ -46,50 +47,84 @@ def _build_ollama_llm():
 
 
 def _build_huggingface_llm():
-    """Build a HuggingFace Hub LLM using LangChain."""
+    """Build HuggingFace LLM using direct requests API."""
     try:
-        from langchain_community.llms import HuggingFaceHub
-        if not HF_API_TOKEN:
-            raise ValueError(
-                "HUGGINGFACEHUB_API_TOKEN environment variable is not set. "
-                "Get a free token at https://huggingface.co/settings/tokens"
-            )
-        return HuggingFaceHub(
-            repo_id=HF_MODEL_ID,
-            huggingfacehub_api_token=HF_API_TOKEN,
-            model_kwargs={"temperature": 0.1, "max_new_tokens": 1024},
-        )
+        from langchain_core.language_models.llms import LLM
+        from typing import Optional, List
+
+        token = os.getenv("HUGGINGFACEHUB_API_TOKEN", "")
+        if not token:
+            raise ValueError("HUGGINGFACEHUB_API_TOKEN not set")
+
+        model_id = os.getenv("HF_MODEL_ID", HF_MODEL_ID)
+
+        class HFDirectLLM(LLM):
+            model_id: str = model_id
+            hf_token: str = token
+
+            @property
+            def _llm_type(self) -> str:
+                return "huggingface_direct"
+
+            def _call(
+                self,
+                prompt: str,
+                stop: Optional[List[str]] = None,
+                **kwargs
+            ) -> str:
+                url = f"https://api-inference.huggingface.co/models/{self.model_id}"
+                headers = {"Authorization": f"Bearer {self.hf_token}"}
+                payload = {
+                    "inputs": prompt,
+                    "parameters": {
+                        "max_new_tokens": 512,
+                        "temperature": 0.1,
+                        "return_full_text": False,
+                        "do_sample": True,
+                    }
+                }
+                response = requests.post(
+                    url, headers=headers, json=payload, timeout=120
+                )
+                response.raise_for_status()
+                result = response.json()
+                if isinstance(result, list) and len(result) > 0:
+                    text = result[0].get("generated_text", "")
+                    return text.strip()
+                elif isinstance(result, dict):
+                    return str(result.get("generated_text", result))
+                return str(result)
+
+        return HFDirectLLM()
+
     except Exception as e:
         logger.error("Failed to build HuggingFace LLM: %s", e)
         raise
 
 
 def _build_llm():
-    """Return the configured LLM based on LLM_BACKEND setting."""
     if LLM_BACKEND == "ollama":
         return _build_ollama_llm()
     elif LLM_BACKEND == "huggingface":
         return _build_huggingface_llm()
     else:
-        raise ValueError(f"Unknown LLM_BACKEND: '{LLM_BACKEND}'. Use 'ollama' or 'huggingface'.")
+        raise ValueError(f"Unknown LLM_BACKEND: '{LLM_BACKEND}'.")
 
 
 # ─── Response Model ───────────────────────────────────────────────────────────
 
 @dataclass
 class RAGResponse:
-    """Complete response from the RAG chain."""
     question: str
     answer: str
     retrieval: RetrievalResult
     response_time_ms: float
     total_time_ms: float
-    citations: list[dict] = field(default_factory=list)
+    citations: list = field(default_factory=list)
     error: Optional[str] = None
 
     @property
     def is_grounded(self) -> bool:
-        """True if the answer was derived from retrieved context."""
         return self.answer != NO_INFO_RESPONSE and self.error is None
 
     @property
@@ -107,17 +142,9 @@ class RAGResponse:
 # ─── RAG Chain ────────────────────────────────────────────────────────────────
 
 class RAGChain:
-    """
-    Main RAG pipeline:
-    1. Retrieve relevant chunks from FAISS
-    2. Format prompt with context
-    3. Generate answer via LLM
-    4. Return grounded, cited response
-    """
-
     def __init__(self, retriever: Optional[PaperRetriever] = None):
         self.retriever = retriever or get_retriever()
-        self._llm = None   # lazy-loaded
+        self._llm = None
 
     @property
     def llm(self):
@@ -126,13 +153,9 @@ class RAGChain:
         return self._llm
 
     def _build_prompt(self, context: str, question: str) -> str:
-        """Construct the full RAG prompt."""
         return RAG_SYSTEM_PROMPT.format(context=context, question=question)
 
-    def _generate(self, prompt: str) -> tuple[str, float]:
-        """
-        Call the LLM and return (response_text, elapsed_ms).
-        """
+    def _generate(self, prompt: str) -> tuple:
         start = time.time()
         try:
             response = self.llm.invoke(prompt)
@@ -147,27 +170,12 @@ class RAGChain:
         self,
         question: str,
         k: int = TOP_K_RETRIEVAL,
-        filter_files: Optional[list[str]] = None,
-        chat_history: Optional[list[dict]] = None,
+        filter_files: Optional[list] = None,
+        chat_history: Optional[list] = None,
     ) -> RAGResponse:
-        """
-        Full RAG pipeline for a single question.
-
-        Args:
-            question: User's question.
-            k: Chunks to retrieve.
-            filter_files: Restrict to specific PDFs.
-            chat_history: Previous Q&A pairs for context (unused in base prompt).
-
-        Returns:
-            RAGResponse with answer, citations, and metrics.
-        """
         pipeline_start = time.time()
-
-        # 1. Retrieve
         retrieval = self.retriever.retrieve(question, k=k, filter_files=filter_files)
 
-        # 2. Guard: nothing retrieved
         if retrieval.is_empty:
             total_ms = (time.time() - pipeline_start) * 1000
             return RAGResponse(
@@ -179,15 +187,11 @@ class RAGChain:
                 citations=[],
             )
 
-        # 3. Format context
         context = retrieval.format_context(include_citations=True)
-
-        # 4. Optionally inject recent chat history
         if chat_history:
-            history_text = self._format_history(chat_history[-4:])  # last 2 turns
+            history_text = self._format_history(chat_history[-4:])
             context = history_text + "\n\n" + context
 
-        # 5. Generate answer
         prompt = self._build_prompt(context=context, question=question)
         try:
             answer_text, response_ms = self._generate(prompt)
@@ -204,7 +208,6 @@ class RAGChain:
 
         total_ms = (time.time() - pipeline_start) * 1000
         citations = retrieval.get_citations()
-
         return RAGResponse(
             question=question,
             answer=answer_text,
@@ -214,8 +217,7 @@ class RAGChain:
             citations=citations,
         )
 
-    def _format_history(self, history: list[dict]) -> str:
-        """Format recent chat history for injection into prompt."""
+    def _format_history(self, history: list) -> str:
         lines = ["Previous conversation:"]
         for turn in history:
             lines.append(f"Q: {turn.get('question', '')}")
@@ -223,13 +225,10 @@ class RAGChain:
         return "\n".join(lines)
 
 
-# ─── Module-Level Singleton ───────────────────────────────────────────────────
-
 _rag_chain: Optional[RAGChain] = None
 
 
 def get_rag_chain() -> RAGChain:
-    """Return the singleton RAGChain."""
     global _rag_chain
     if _rag_chain is None:
         _rag_chain = RAGChain()
