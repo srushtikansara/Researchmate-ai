@@ -47,14 +47,22 @@ def _build_ollama_llm():
 
 
 def _build_huggingface_llm():
-    """Build HuggingFace LLM using direct requests API."""
+    """
+    Build HuggingFace LLM using direct HF Inference API (requests).
+    Uses chat-completion endpoint for instruction-tuned models,
+    falls back to text-generation endpoint if that fails.
+    """
     try:
         from langchain_core.language_models.llms import LLM
         from typing import Optional, List
 
-        token = os.getenv("HUGGINGFACEHUB_API_TOKEN", "")
+        token = os.getenv("HUGGINGFACEHUB_API_TOKEN", HF_API_TOKEN or "")
         if not token:
-            raise ValueError("HUGGINGFACEHUB_API_TOKEN not set")
+            raise ValueError(
+                "HUGGINGFACEHUB_API_TOKEN not set. "
+                "Add it in Streamlit Cloud → Settings → Secrets."
+            )
+
         _model_id = os.getenv("HF_MODEL_ID", HF_MODEL_ID)
         _token = token
 
@@ -70,30 +78,78 @@ def _build_huggingface_llm():
                 self,
                 prompt: str,
                 stop: Optional[List[str]] = None,
-                **kwargs
+                **kwargs,
             ) -> str:
-                url = f"https://api-inference.huggingface.co/models/{self.model_id}"
-                headers = {"Authorization": f"Bearer {self.hf_token}"}
-                payload = {
+                # ── Try chat-completion endpoint first (works for most
+                #    instruction-tuned models on HF inference API) ──────────
+                chat_url = (
+                    f"https://api-inference.huggingface.co/models/"
+                    f"{self.model_id}/v1/chat/completions"
+                )
+                headers = {
+                    "Authorization": f"Bearer {self.hf_token}",
+                    "Content-Type": "application/json",
+                }
+                chat_payload = {
+                    "model": self.model_id,
+                    "messages": [{"role": "user", "content": prompt}],
+                    "max_tokens": 512,
+                    "temperature": 0.1,
+                    "stream": False,
+                }
+
+                try:
+                    resp = requests.post(
+                        chat_url,
+                        headers=headers,
+                        json=chat_payload,
+                        timeout=120,
+                    )
+                    if resp.status_code == 200:
+                        data = resp.json()
+                        return (
+                            data["choices"][0]["message"]["content"].strip()
+                        )
+                    logger.warning(
+                        "Chat-completion endpoint returned %s — "
+                        "falling back to text-generation endpoint.",
+                        resp.status_code,
+                    )
+                except Exception as chat_err:
+                    logger.warning(
+                        "Chat-completion attempt failed (%s) — "
+                        "falling back to text-generation endpoint.",
+                        chat_err,
+                    )
+
+                # ── Fallback: plain text-generation endpoint ───────────────
+                gen_url = (
+                    f"https://api-inference.huggingface.co/models/"
+                    f"{self.model_id}"
+                )
+                gen_payload = {
                     "inputs": prompt,
                     "parameters": {
                         "max_new_tokens": 512,
                         "temperature": 0.1,
                         "return_full_text": False,
                         "do_sample": True,
-                    }
+                    },
                 }
-                response = requests.post(
-                    url, headers=headers, json=payload, timeout=120
+                resp = requests.post(
+                    gen_url,
+                    headers=headers,
+                    json=gen_payload,
+                    timeout=120,
                 )
-                response.raise_for_status()
-                result = response.json()
-                if isinstance(result, list) and len(result) > 0:
-                    text = result[0].get("generated_text", "")
-                    return text.strip()
-                elif isinstance(result, dict):
-                    return str(result.get("generated_text", result))
-                return str(result)
+                resp.raise_for_status()
+                result = resp.json()
+
+                if isinstance(result, list) and result:
+                    return result[0].get("generated_text", "").strip()
+                if isinstance(result, dict):
+                    return str(result.get("generated_text", result)).strip()
+                return str(result).strip()
 
         return HFDirectLLM()
 
@@ -174,7 +230,9 @@ class RAGChain:
         chat_history: Optional[list] = None,
     ) -> RAGResponse:
         pipeline_start = time.time()
-        retrieval = self.retriever.retrieve(question, k=k, filter_files=filter_files)
+        retrieval = self.retriever.retrieve(
+            question, k=k, filter_files=filter_files
+        )
 
         if retrieval.is_empty:
             total_ms = (time.time() - pipeline_start) * 1000

@@ -39,7 +39,8 @@ from utils.helpers import format_time_ms, setup_logging
 
 setup_logging("INFO")
 logger = logging.getLogger(__name__)
-
+os.environ["TRANSFORMERS_NO_ADVISORY_WARNINGS"] = "1"
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 # ─── CSS ──────────────────────────────────────────────────────────────────────
 st.markdown("""
