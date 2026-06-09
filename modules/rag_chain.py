@@ -87,11 +87,8 @@ def _build_huggingface_llm():
                 return "huggingface_direct"
 
             def _try_chat(self, model: str, prompt: str, headers: dict) -> Optional[str]:
-                """Try the chat-completion endpoint for a given model."""
-                url = (
-                    f"https://api-inference.huggingface.co/models/"
-                    f"{model}/v1/chat/completions"
-                )
+                """Try the chat-completion endpoint via Nebius provider."""
+                url = "https://router.huggingface.co/nebius/v1/chat/completions"
                 payload = {
                     "model": model,
                     "messages": [{"role": "user", "content": prompt}],
@@ -110,33 +107,24 @@ def _build_huggingface_llm():
                 return None
 
             def _try_text_gen(self, model: str, prompt: str, headers: dict) -> Optional[str]:
-                """Try the text-generation endpoint for a given model."""
-                url = (
-                    f"https://router.huggingface.co/hf-inference/models/{model}"
-                )
+                """Try the chat-completion endpoint via Together provider as fallback."""
+                url = "https://router.huggingface.co/together/v1/chat/completions"
                 payload = {
-                    "inputs": prompt,
-                    "parameters": {
-                        "max_new_tokens": 512,
-                        "temperature": 0.1,
-                        "return_full_text": False,
-                        "do_sample": True,
-                    },
+                    "model": model,
+                    "messages": [{"role": "user", "content": prompt}],
+                    "max_tokens": 512,
+                    "temperature": 0.1,
+                    "stream": False,
                 }
                 try:
                     resp = requests.post(url, headers=headers, json=payload, timeout=120)
                     if resp.status_code == 200:
-                        result = resp.json()
-                        if isinstance(result, list) and result:
-                            return result[0].get("generated_text", "").strip()
-                        if isinstance(result, dict):
-                            return str(result.get("generated_text", result)).strip()
-                        return str(result).strip()
-                    logger.warning("Text-gen endpoint for %s returned HTTP %s: %s", model, resp.status_code, resp.text[:200])
+                        data = resp.json()
+                        return data["choices"][0]["message"]["content"].strip()
+                        logger.warning("Text-gen endpoint for %s returned HTTP %s: %s", model, resp.status_code, resp.text[:200])
                 except Exception as e:
                     logger.warning("Text-gen endpoint for %s raised: %s", model, e)
                 return None
-
             def _call(
                 self,
                 prompt: str,
