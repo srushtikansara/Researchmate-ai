@@ -89,7 +89,7 @@ def _build_huggingface_llm():
             def _try_chat(self, model: str, prompt: str, headers: dict) -> Optional[str]:
                 """Try the chat-completion endpoint for a given model."""
                 url = (
-                    f"https://router.huggingface.co/hf-inference/models/"
+                    f"https://api-inference.huggingface.co/models/"
                     f"{model}/v1/chat/completions"
                 )
                 payload = {
