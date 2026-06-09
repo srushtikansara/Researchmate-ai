@@ -1,4 +1,4 @@
-[theme]
+﻿[theme]
 base = "dark"
 primaryColor = "#4F6AF5"
 backgroundColor = "#0E0E1A"
@@ -13,5 +13,3 @@ enableXsrfProtection = true
 
 [browser]
 gatherUsageStats = false
-[server]
-fileWatcherType = "none"
