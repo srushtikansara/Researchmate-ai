@@ -51,12 +51,13 @@ def _build_huggingface_llm():
     Build HuggingFace LLM using direct HF Inference API (requests).
     Uses chat-completion endpoint for instruction-tuned models,
     falls back to text-generation endpoint if that fails.
+    Uses router.huggingface.co for better Streamlit Cloud compatibility.
     """
     try:
         from langchain_core.language_models.llms import LLM
         from typing import Optional, List
 
-        token = os.getenv("HUGGINGFACEHUB_API_TOKEN", HF_API_TOKEN or "")
+        token = os.getenv("HUGGINGFACEHUB_API_TOKEN") or os.getenv("HF_API_TOKEN") or HF_API_TOKEN or ""
         if not token:
             raise ValueError(
                 "HUGGINGFACEHUB_API_TOKEN not set. "
@@ -80,16 +81,16 @@ def _build_huggingface_llm():
                 stop: Optional[List[str]] = None,
                 **kwargs,
             ) -> str:
-                # ── Try chat-completion endpoint first (works for most
-                #    instruction-tuned models on HF inference API) ──────────
-                chat_url = (
-                    f"https://api-inference.huggingface.co/models/"
-                    f"{self.model_id}/v1/chat/completions"
-                )
                 headers = {
                     "Authorization": f"Bearer {self.hf_token}",
                     "Content-Type": "application/json",
                 }
+
+                # ── Try chat-completion endpoint first ─────────────────────
+                chat_url = (
+                    f"https://router.huggingface.co/hf-inference/models/"
+                    f"{self.model_id}/v1/chat/completions"
+                )
                 chat_payload = {
                     "model": self.model_id,
                     "messages": [{"role": "user", "content": prompt}],
@@ -124,7 +125,7 @@ def _build_huggingface_llm():
 
                 # ── Fallback: plain text-generation endpoint ───────────────
                 gen_url = (
-                    f"https://api-inference.huggingface.co/models/"
+                    f"https://router.huggingface.co/hf-inference/models/"
                     f"{self.model_id}"
                 )
                 gen_payload = {
