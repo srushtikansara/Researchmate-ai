@@ -28,6 +28,13 @@ logger = logging.getLogger(__name__)
 
 NO_INFO_RESPONSE = "I could not find this information in the uploaded paper."
 
+# Models known to work reliably on HF free inference API
+_FALLBACK_MODELS = [
+    "Qwen/Qwen2.5-7B-Instruct",
+    "microsoft/Phi-3.5-mini-instruct",
+    "google/gemma-2-2b-it",
+]
+
 
 # ─── LLM Backends ─────────────────────────────────────────────────────────────
 
@@ -49,15 +56,19 @@ def _build_ollama_llm():
 def _build_huggingface_llm():
     """
     Build HuggingFace LLM using direct HF Inference API (requests).
-    Uses chat-completion endpoint for instruction-tuned models,
-    falls back to text-generation endpoint if that fails.
-    Uses router.huggingface.co for better Streamlit Cloud compatibility.
+    Tries chat-completion endpoint first, then text-generation fallback.
+    Tries multiple models if the configured one fails.
     """
     try:
         from langchain_core.language_models.llms import LLM
         from typing import Optional, List
 
-        token = os.getenv("HUGGINGFACEHUB_API_TOKEN") or os.getenv("HF_API_TOKEN") or HF_API_TOKEN or ""
+        token = (
+            os.getenv("HUGGINGFACEHUB_API_TOKEN")
+            or os.getenv("HF_API_TOKEN")
+            or HF_API_TOKEN
+            or ""
+        )
         if not token:
             raise ValueError(
                 "HUGGINGFACEHUB_API_TOKEN not set. "
@@ -75,6 +86,57 @@ def _build_huggingface_llm():
             def _llm_type(self) -> str:
                 return "huggingface_direct"
 
+            def _try_chat(self, model: str, prompt: str, headers: dict) -> Optional[str]:
+                """Try the chat-completion endpoint for a given model."""
+                url = (
+                    f"https://router.huggingface.co/hf-inference/models/"
+                    f"{model}/v1/chat/completions"
+                )
+                payload = {
+                    "model": model,
+                    "messages": [{"role": "user", "content": prompt}],
+                    "max_tokens": 512,
+                    "temperature": 0.1,
+                    "stream": False,
+                }
+                try:
+                    resp = requests.post(url, headers=headers, json=payload, timeout=120)
+                    if resp.status_code == 200:
+                        data = resp.json()
+                        return data["choices"][0]["message"]["content"].strip()
+                    logger.warning("Chat endpoint for %s returned HTTP %s: %s", model, resp.status_code, resp.text[:200])
+                except Exception as e:
+                    logger.warning("Chat endpoint for %s raised: %s", model, e)
+                return None
+
+            def _try_text_gen(self, model: str, prompt: str, headers: dict) -> Optional[str]:
+                """Try the text-generation endpoint for a given model."""
+                url = (
+                    f"https://router.huggingface.co/hf-inference/models/{model}"
+                )
+                payload = {
+                    "inputs": prompt,
+                    "parameters": {
+                        "max_new_tokens": 512,
+                        "temperature": 0.1,
+                        "return_full_text": False,
+                        "do_sample": True,
+                    },
+                }
+                try:
+                    resp = requests.post(url, headers=headers, json=payload, timeout=120)
+                    if resp.status_code == 200:
+                        result = resp.json()
+                        if isinstance(result, list) and result:
+                            return result[0].get("generated_text", "").strip()
+                        if isinstance(result, dict):
+                            return str(result.get("generated_text", result)).strip()
+                        return str(result).strip()
+                    logger.warning("Text-gen endpoint for %s returned HTTP %s: %s", model, resp.status_code, resp.text[:200])
+                except Exception as e:
+                    logger.warning("Text-gen endpoint for %s raised: %s", model, e)
+                return None
+
             def _call(
                 self,
                 prompt: str,
@@ -86,71 +148,32 @@ def _build_huggingface_llm():
                     "Content-Type": "application/json",
                 }
 
-                # ── Try chat-completion endpoint first ─────────────────────
-                chat_url = (
-                    f"https://router.huggingface.co/hf-inference/models/"
-                    f"{self.model_id}/v1/chat/completions"
-                )
-                chat_payload = {
-                    "model": self.model_id,
-                    "messages": [{"role": "user", "content": prompt}],
-                    "max_tokens": 512,
-                    "temperature": 0.1,
-                    "stream": False,
-                }
+                # Try configured model first, then fallbacks
+                models_to_try = [self.model_id] + [
+                    m for m in _FALLBACK_MODELS if m != self.model_id
+                ]
 
-                try:
-                    resp = requests.post(
-                        chat_url,
-                        headers=headers,
-                        json=chat_payload,
-                        timeout=120,
-                    )
-                    if resp.status_code == 200:
-                        data = resp.json()
-                        return (
-                            data["choices"][0]["message"]["content"].strip()
-                        )
-                    logger.warning(
-                        "Chat-completion endpoint returned %s — "
-                        "falling back to text-generation endpoint.",
-                        resp.status_code,
-                    )
-                except Exception as chat_err:
-                    logger.warning(
-                        "Chat-completion attempt failed (%s) — "
-                        "falling back to text-generation endpoint.",
-                        chat_err,
-                    )
+                for model in models_to_try:
+                    logger.info("Trying model: %s", model)
 
-                # ── Fallback: plain text-generation endpoint ───────────────
-                gen_url = (
-                    f"https://router.huggingface.co/hf-inference/models/"
-                    f"{self.model_id}"
-                )
-                gen_payload = {
-                    "inputs": prompt,
-                    "parameters": {
-                        "max_new_tokens": 512,
-                        "temperature": 0.1,
-                        "return_full_text": False,
-                        "do_sample": True,
-                    },
-                }
-                resp = requests.post(
-                    gen_url,
-                    headers=headers,
-                    json=gen_payload,
-                    timeout=120,
-                )
-                resp.raise_for_status()
-                result = resp.json()
+                    # Try chat endpoint
+                    result = self._try_chat(model, prompt, headers)
+                    if result:
+                        logger.info("Success with chat endpoint on %s", model)
+                        return result
 
-                if isinstance(result, list) and result:
-                    return result[0].get("generated_text", "").strip()
-                if isinstance(result, dict):
-                    return str(result.get("generated_text", result)).strip()
-                return str(result).strip()
+                    # Try text-gen endpoint
+                    result = self._try_text_gen(model, prompt, headers)
+                    if result:
+                        logger.info("Success with text-gen endpoint on %s", model)
+                        return result
+
+                    logger.warning("Both endpoints failed for %s, trying next model.", model)
+
+                raise RuntimeError(
+                    "All models and endpoints failed. "
+                    "Check your HF token and model availability."
+                )
 
         return HFDirectLLM()
 
