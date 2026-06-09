@@ -28,11 +28,16 @@ logger = logging.getLogger(__name__)
 
 NO_INFO_RESPONSE = "I could not find this information in the uploaded paper."
 
-# Models known to work reliably on HF free inference API
 _FALLBACK_MODELS = [
+    "mistralai/Mistral-7B-Instruct-v0.3",
     "Qwen/Qwen2.5-7B-Instruct",
     "microsoft/Phi-3.5-mini-instruct",
     "google/gemma-2-2b-it",
+]
+
+_PROVIDERS = [
+    "featherless-ai",
+    "fireworks-ai",
 ]
 
 
@@ -55,9 +60,8 @@ def _build_ollama_llm():
 
 def _build_huggingface_llm():
     """
-    Build HuggingFace LLM using direct HF Inference API (requests).
-    Tries chat-completion endpoint first, then text-generation fallback.
-    Tries multiple models if the configured one fails.
+    Build HuggingFace LLM using HF router with multiple provider fallbacks.
+    Tries featherless-ai and fireworks-ai providers which are free tier.
     """
     try:
         from langchain_core.language_models.llms import LLM
@@ -86,9 +90,9 @@ def _build_huggingface_llm():
             def _llm_type(self) -> str:
                 return "huggingface_direct"
 
-            def _try_chat(self, model: str, prompt: str, headers: dict) -> Optional[str]:
-                """Try the chat-completion endpoint via Nebius provider."""
-                url = "https://router.huggingface.co/nebius/v1/chat/completions"
+            def _try_provider(self, provider: str, model: str, prompt: str, headers: dict) -> Optional[str]:
+                """Try a specific provider via router.huggingface.co."""
+                url = f"https://router.huggingface.co/{provider}/v1/chat/completions"
                 payload = {
                     "model": model,
                     "messages": [{"role": "user", "content": prompt}],
@@ -101,34 +105,18 @@ def _build_huggingface_llm():
                     if resp.status_code == 200:
                         data = resp.json()
                         return data["choices"][0]["message"]["content"].strip()
-                    logger.warning("Chat endpoint for %s returned HTTP %s: %s", model, resp.status_code, resp.text[:200])
+                    logger.warning(
+                        "Provider %s / model %s returned HTTP %s: %s",
+                        provider, model, resp.status_code, resp.text[:200]
+                    )
                 except Exception as e:
-                    logger.warning("Chat endpoint for %s raised: %s", model, e)
+                    logger.warning("Provider %s / model %s raised: %s", provider, model, e)
                 return None
 
-            def _try_text_gen(self, model: str, prompt: str, headers: dict) -> Optional[str]:
-                """Try the chat-completion endpoint via Together provider as fallback."""
-                url = "https://router.huggingface.co/together/v1/chat/completions"
-                payload = {
-                    "model": model,
-                    "messages": [{"role": "user", "content": prompt}],
-                    "max_tokens": 512,
-                    "temperature": 0.1,
-                    "stream": False,
-                }
-                try:
-                    resp = requests.post(url, headers=headers, json=payload, timeout=120)
-                    if resp.status_code == 200:
-                        data = resp.json()
-                        return data["choices"][0]["message"]["content"].strip()
-                        logger.warning("Text-gen endpoint for %s returned HTTP %s: %s", model, resp.status_code, resp.text[:200])
-                except Exception as e:
-                    logger.warning("Text-gen endpoint for %s raised: %s", model, e)
-                return None
             def _call(
                 self,
                 prompt: str,
-                stop: Optional[List[str]] = None,
+                stop=None,
                 **kwargs,
             ) -> str:
                 headers = {
@@ -136,31 +124,23 @@ def _build_huggingface_llm():
                     "Content-Type": "application/json",
                 }
 
-                # Try configured model first, then fallbacks
+                # Build list of models to try
                 models_to_try = [self.model_id] + [
                     m for m in _FALLBACK_MODELS if m != self.model_id
                 ]
 
+                # Try each model with each provider
                 for model in models_to_try:
-                    logger.info("Trying model: %s", model)
-
-                    # Try chat endpoint
-                    result = self._try_chat(model, prompt, headers)
-                    if result:
-                        logger.info("Success with chat endpoint on %s", model)
-                        return result
-
-                    # Try text-gen endpoint
-                    result = self._try_text_gen(model, prompt, headers)
-                    if result:
-                        logger.info("Success with text-gen endpoint on %s", model)
-                        return result
-
-                    logger.warning("Both endpoints failed for %s, trying next model.", model)
+                    for provider in _PROVIDERS:
+                        logger.info("Trying provider=%s model=%s", provider, model)
+                        result = self._try_provider(provider, model, prompt, headers)
+                        if result:
+                            logger.info("Success with provider=%s model=%s", provider, model)
+                            return result
 
                 raise RuntimeError(
-                    "All models and endpoints failed. "
-                    "Check your HF token and model availability."
+                    "All models and providers failed. "
+                    "Check your HF token and model/provider availability."
                 )
 
         return HFDirectLLM()
